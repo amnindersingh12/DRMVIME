@@ -11,7 +11,7 @@ Usage:
 5. Find the license URL (drm-server/getlicense?token=...)
 6. Run this script and provide both URLs
 """
-
+# Extract meta data and use the title of the video as the name of the file 
 import subprocess
 import sys
 import requests
@@ -28,6 +28,46 @@ except ImportError:
     print("❌ pywidevine is required but not installed!")
     print("Install with: uv pip install pywidevine")
     sys.exit(1)
+
+
+def extract_metadata_from_mpd(mpd_url):
+    """Extract metadata (title, duration) from MPD manifest"""
+    headers = {
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    }
+    
+    response = requests.get(mpd_url, headers=headers, timeout=10)
+    response.raise_for_status()
+    
+    root = ET.fromstring(response.content)
+    
+    metadata = {
+        'title': None,
+        'duration': None
+    }
+    
+    # Try to extract title from URL (content ID)
+    # URL format: .../contentid/hash/hash.mpd
+    parts = mpd_url.rstrip('/').split('/')
+    if len(parts) >= 3:
+        content_id = parts[-2]  # Get the hash before .mpd
+        metadata['title'] = content_id[:16]  # Use first 16 chars as title
+    
+    # Try to get duration from MPD
+    for elem in root.iter():
+        if 'mediaPresentationDuration' in elem.attrib:
+            duration_str = elem.attrib['mediaPresentationDuration']
+            # Parse ISO 8601 duration (PT1H2M3S format)
+            import re
+            match = re.search(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?', duration_str)
+            if match:
+                hours = int(match.group(1) or 0)
+                minutes = int(match.group(2) or 0)
+                seconds = float(match.group(3) or 0)
+                total_minutes = hours * 60 + minutes + seconds / 60
+                metadata['duration'] = f"{int(total_minutes)}min"
+    
+    return metadata
 
 
 def extract_pssh_from_mpd(mpd_url):
@@ -253,14 +293,11 @@ def download_with_keys(mpd_url, keys, output_name):
                     print(f"\n📁 READY TO PLAY: {merged_file}")
                     print(f"   Resolution: 1280x720")
                     
-                    # Optionally delete intermediate files
-                    cleanup = input("\nDelete intermediate files? (y/N): ").strip().lower()
-                    if cleanup == 'y':
-                        video_file.unlink(missing_ok=True)
-                        audio_file.unlink(missing_ok=True)
-                        video_decrypted.unlink(missing_ok=True)
-                        audio_decrypted.unlink(missing_ok=True)
-                        print("🗑️  Cleaned up intermediate files")
+                    video_file.unlink(missing_ok=True)
+                    audio_file.unlink(missing_ok=True)
+                    video_decrypted.unlink(missing_ok=True)
+                    audio_decrypted.unlink(missing_ok=True)
+                    print("🗑️  Cleaned up intermediate files")
                 else:
                     print(f"⚠️  Merge failed. Decrypted files available:")
                     print(f"   Video: {video_decrypted}")
@@ -295,58 +332,143 @@ def main():
     print("=" * 80)
     print()
     
-    # Get MPD URL
-    mpd_url = input("📍 Paste the MPD URL (.mpd): ").strip()
-    
-    if not mpd_url:
-        print("❌ No MPD URL provided!")
-        sys.exit(1)
-    
-    if not mpd_url.endswith('.mpd'):
-        print("⚠️  Warning: URL doesn't end with .mpd - are you sure this is correct?")
-    
-    print()
-    
-    # Get License URL
-    license_url = input("🔐 Paste the License URL (with token): ").strip()
-    
-    if not license_url:
-        print("❌ No license URL provided!")
-        sys.exit(1)
-    
-    if "getlicense" not in license_url:
-        print("❌ Invalid license URL! Must contain 'getlicense'")
-        sys.exit(1)
-    
-    if "token=" not in license_url:
-        print("❌ License URL must contain a token parameter!")
-        sys.exit(1)
-    
-    print()
-    
     # Configuration
     wvd_path = "./WVDs/device.wvd"
     
-    output_name = input("Enter output filename (default: twinvine_720p): ").strip() or "twinvine_720p"
-    print()
-    print("=" * 80)
+    # Batch download mode
+    videos_downloaded = 0
     
-    try:
-        # Step 1: Extract keys
-        keys = get_keys(mpd_url, license_url, wvd_path)
+    while True:
+        if videos_downloaded > 0:
+            print("\n" + "=" * 80)
+            print(f"✅ Downloaded {videos_downloaded} video(s) so far")
+            print("=" * 80)
+            print()
         
-        # Step 2: Download with keys (720p)
-        success = download_with_keys(mpd_url, keys, output_name)
+        # Get MPD URL
+        mpd_url = input("📍 Paste the MPD URL (.mpd): ").strip()
         
-        if not success:
+        if not mpd_url:
+            if videos_downloaded > 0:
+                print(f"\n🎉 Batch download complete! Downloaded {videos_downloaded} video(s)")
+                break
+            else:
+                print("❌ No MPD URL provided!")
+                sys.exit(1)
+        
+        if not mpd_url.endswith('.mpd'):
+            print("⚠️  Warning: URL doesn't end with .mpd - are you sure this is correct?")
+        
+        print()
+        
+        # Get License URL
+        license_url = input("🔐 Paste the License URL (with token): ").strip()
+        
+        if not license_url:
+            print("❌ No license URL provided!")
+            if videos_downloaded > 0:
+                print(f"Stopping batch download. Downloaded {videos_downloaded} video(s)")
+                break
             sys.exit(1)
+        
+        if "getlicense" not in license_url:
+            print("❌ Invalid license URL! Must contain 'getlicense'")
+            continue
+        
+        if "token=" not in license_url:
+            print("❌ License URL must contain a token parameter!")
+            continue
+        
+        print()
+        
+        try:
+            # Extract metadata from MPD
+            print("📊 Extracting metadata...")
+            metadata = extract_metadata_from_mpd(mpd_url)
             
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+            # Use title from metadata or ask user
+            if metadata['title']:
+                suggested_name = metadata['title'].replace('/', '_').replace(' ', '_')
+                print(f"📝 Detected title: {metadata['title']}")
+                if metadata['duration']:
+                    print(f"⏱️  Duration: {metadata['duration']}")
+                print()
+                print(f"💡 Suggested filename: {suggested_name}")
+                print("   (Press Enter to use suggested name, or type a custom name)")
+                print()
+                
+                while True:
+                    custom_name = input(f"Filename: ").strip()
+                    
+                    # If empty, use suggested name
+                    if not custom_name:
+                        output_name = suggested_name
+                        break
+                    
+                    # Validate: reject if looks like a URL
+                    if custom_name.startswith('http://') or custom_name.startswith('https://'):
+                        print("❌ That looks like a URL! Please enter just the filename.")
+                        print(f"   Example: lesson1, ancient_history, etc.")
+                        continue
+                    
+                    # Validate: reject if too long
+                    if len(custom_name) > 100:
+                        print("❌ Filename too long! Please use a shorter name.")
+                        continue
+                    
+                    output_name = custom_name
+                    break
+            else:
+                output_name = input("Enter output filename (default: twinvine_720p): ").strip() or "twinvine_720p"
+            
+            # Sanitize filename (remove invalid characters)
+            output_name = output_name.replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_')
+            
+            print()
+            print("=" * 80)
+            
+            # Step 1: Extract keys
+            keys = get_keys(mpd_url, license_url, wvd_path)
+            
+            # Step 2: Download with keys (720p)
+            success = download_with_keys(mpd_url, keys, output_name)
+            
+            if success:
+                videos_downloaded += 1
+                
+                # Ask if user wants to download another
+                print()
+                another = input("📥 Download another video? (y/N): ").strip().lower()
+                if another != 'y':
+                    print(f"\n🎉 Complete! Downloaded {videos_downloaded} video(s)")
+                    break
+            else:
+                print("\n⚠️  Download failed. Try again or exit.")
+                retry = input("Retry this video? (y/N): ").strip().lower()
+                if retry != 'y':
+                    if videos_downloaded > 0:
+                        print(f"\nDownloaded {videos_downloaded} video(s) before error")
+                    sys.exit(1)
+                
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Interrupted by user")
+            if videos_downloaded > 0:
+                print(f"Downloaded {videos_downloaded} video(s) before interruption")
+            sys.exit(0)
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            if videos_downloaded > 0:
+                cont = input("\nContinue with next video? (y/N): ").strip().lower()
+                if cont != 'y':
+                    print(f"Downloaded {videos_downloaded} video(s) before error")
+                    sys.exit(1)
+            else:
+                sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+

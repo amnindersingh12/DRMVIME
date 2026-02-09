@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Downloads and temporary files
+downloads/
+*.mp4
+*.m4a
+*.mkv
+*.webm
+tmp/
+
+# Sensitive files
+WVDs/
+*.wvd
+vaults/
+*.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+debug_*.txt
+
+# Environment
+.env
+.env.local

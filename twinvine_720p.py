@@ -189,9 +189,138 @@ def get_keys(mpd_url, license_url, wvd_path):
     return keys
 
 
-def download_with_keys(mpd_url, keys, output_name):
+def process_downloaded_files(output_name, keys, video_file, audio_file):
+    """Process already downloaded encrypted files - decrypt and merge"""
+    if not video_file.exists() or not audio_file.exists():
+        print(f"❌ Missing files for processing:")
+        if not video_file.exists():
+            print(f"   Missing: {video_file}")
+        if not audio_file.exists():
+            print(f"   Missing: {audio_file}")
+        return False
+    
+    print("\n🔓 Decrypting files with mp4decrypt...")
+    
+    video_decrypted = Path(f"./downloads/{output_name}_decrypted.mp4")
+    audio_decrypted = Path(f"./downloads/{output_name}_decrypted.m4a")
+    
+    # Build mp4decrypt command with all keys
+    decrypt_args = []
+    for key in keys:
+        decrypt_args.extend(["--key", key])
+    
+    # Decrypt video
+    decrypt_video_cmd = ["mp4decrypt"] + decrypt_args + [str(video_file), str(video_decrypted)]
+    decrypt_result = subprocess.run(decrypt_video_cmd, capture_output=True, text=True)
+    
+    if decrypt_result.returncode != 0:
+        print(f"❌ Video decryption failed: {decrypt_result.stderr[:200]}")
+        return False
+    else:
+        print(f"✅ Video decrypted (720p)")
+    
+    # Decrypt audio
+    decrypt_audio_cmd = ["mp4decrypt"] + decrypt_args + [str(audio_file), str(audio_decrypted)]
+    decrypt_result = subprocess.run(decrypt_audio_cmd, capture_output=True, text=True)
+    
+    if decrypt_result.returncode != 0:
+        print(f"❌ Audio decryption failed: {decrypt_result.stderr[:200]}")
+        return False
+    else:
+        print(f"✅ Audio decrypted")
+    
+    # Merge decrypted files
+    merged_file = Path(f"./downloads/{output_name}_720p_FINAL.mp4")
+    
+    if video_decrypted.exists() and audio_decrypted.exists():
+        print("\n🔧 Merging decrypted audio and video...")
+        merge_cmd = [
+            "ffmpeg",
+            "-i", str(video_decrypted),
+            "-i", str(audio_decrypted),
+            "-c", "copy",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            str(merged_file),
+            "-y"
+        ]
+        
+        merge_result = subprocess.run(merge_cmd, capture_output=True, text=True)
+        
+        if merge_result.returncode == 0:
+            print(f"✅ Final 720p file created!")
+            print(f"\n📁 READY TO PLAY: {merged_file}")
+            print(f"   Resolution: 1280x720")
+            
+            # Cleanup
+            video_file.unlink(missing_ok=True)
+            audio_file.unlink(missing_ok=True)
+            video_decrypted.unlink(missing_ok=True)
+            audio_decrypted.unlink(missing_ok=True)
+            print("🗑️  Cleaned up intermediate files")
+            return True
+        else:
+            print(f"❌ Merge failed: {merge_result.stderr[:200]}")
+            print(f"   Decrypted files available:")
+            print(f"   Video: {video_decrypted}")
+            print(f"   Audio: {audio_decrypted}")
+            return False
+    else:
+        print(f"❌ Decryption failed. Missing decrypted files.")
+        return False
+
+
+def download_with_keys(mpd_url, keys, output_name, max_retries=3):
     """Download using N_m3u8DL-RE with extracted keys, then decrypt and merge"""
     print("\n📦 Starting download with N_m3u8DL-RE...")
+    
+    # Check if final file already exists
+    final_file = Path(f"./downloads/{output_name}_720p_FINAL.mp4")
+    if final_file.exists():
+        file_size_mb = final_file.stat().st_size / (1024 * 1024)
+        print(f"\n⚠️  Final file already exists: {final_file}")
+        print(f"   Size: {file_size_mb:.2f} MB")
+        
+        choice = input("\nWhat would you like to do?\n  [s] Skip (use existing file)\n  [o] Overwrite (download again)\n  [r] Rename (download with new name)\nChoice (s/o/r): ").strip().lower()
+        
+        if choice == 's':
+            print(f"✅ Using existing file: {final_file}")
+            return True
+        elif choice == 'r':
+            new_name = input("Enter new output name: ").strip()
+            if new_name:
+                output_name = new_name
+                final_file = Path(f"./downloads/{output_name}_720p_FINAL.mp4")
+                print(f"📝 Will save as: {output_name}")
+            else:
+                print("❌ Invalid name, aborting")
+                return False
+        elif choice == 'o':
+            print("🔄 Will overwrite existing file")
+        else:
+            print("❌ Invalid choice, aborting")
+            return False
+    
+    # Check for partial downloads (encrypted files without final)
+    video_file = Path(f"./downloads/{output_name}.mp4")
+    audio_file = Path(f"./downloads/{output_name}.m4a")
+    
+    if video_file.exists() or audio_file.exists():
+        print(f"\n⚠️  Found partial download:")
+        if video_file.exists():
+            print(f"   Video: {video_file} ({video_file.stat().st_size / (1024*1024):.2f} MB)")
+        if audio_file.exists():
+            print(f"   Audio: {audio_file} ({audio_file.stat().st_size / (1024*1024):.2f} MB)")
+        
+        resume = input("\nResume from partial download? (y/N): ").strip().lower()
+        if resume == 'y':
+            print("🔄 Attempting to resume (will skip download, go straight to decrypt/merge)")
+            # Skip to decryption/merge step
+            return process_downloaded_files(output_name, keys, video_file, audio_file)
+        else:
+            print("🗑️  Will clean up partial files and start fresh")
+            video_file.unlink(missing_ok=True)
+            audio_file.unlink(missing_ok=True)
     
     # Locate binary
     binary_path = "N_m3u8DL-RE"
@@ -203,107 +332,80 @@ def download_with_keys(mpd_url, keys, output_name):
     Path("./downloads").mkdir(exist_ok=True)
     Path("./downloads/tmp").mkdir(exist_ok=True)
     
-    # Build command - select 720p video (highest quality) and audio
-    cmd = [
-        binary_path,
-        mpd_url,
-        "--save-name", output_name,
-        "--save-dir", "./downloads",
-        "--tmp-dir", "./downloads/tmp",
-        "--binary-merge",
-        "-mt",
-        "--auto-select"  # Automatically select best video and audio
+    # Thread configurations to try (start with more threads, reduce on failure)
+    thread_configs = [
+        {"threads": 16, "name": "16 threads (fast)"},
+        {"threads": 8, "name": "8 threads (balanced)"},
+        {"threads": 4, "name": "4 threads (stable)"},
+        {"threads": 1, "name": "1 thread (safe)"}
     ]
     
-    # Add keys
-    for key in keys:
-        cmd.extend(["--key", key])
+    result = None
     
-    # Add headers
-    cmd.extend([
-        "-H", "accept: */*",
-        "-H", "origin: https://testbook.com",
-        "-H", "referer: https://testbook.com/",
-        "-H", "user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
-    ])
-    
-    print(f"🚀 Downloading 720p video to: ./downloads/{output_name}")
-    print("=" * 80)
-    
-    result = subprocess.run(cmd)
-    
-    if result.returncode == 0:
-        print("\n" + "=" * 80)
-        print("✅ Download Complete!")
+    for attempt in range(max_retries):
+        # Use different thread count for each retry
+        config = thread_configs[min(attempt, len(thread_configs) - 1)]
+        thread_count = config["threads"]
         
+        print(f"\n{'🔄 Retry ' + str(attempt + 1) if attempt > 0 else '🚀 Attempt 1'} - Using {config['name']}")
+        
+        # Build command - select 720p video (highest quality) and audio
+        cmd = [
+            binary_path,
+            mpd_url,
+            "--save-name", output_name,
+            "--save-dir", "./downloads",
+            "--tmp-dir", "./downloads/tmp",
+            "--binary-merge",
+            "--thread-count", str(thread_count),  # Configurable thread count
+            "--auto-select",  # Automatically select best video and audio
+            "--check-segments-count", "false"  # Skip segment count check (helps with failures)
+        ]
+        
+        # Add keys
+        for key in keys:
+            cmd.extend(["--key", key])
+        
+        # Add headers
+        cmd.extend([
+            "-H", "accept: */*",
+            "-H", "origin: https://example.com",
+            "-H", "referer: https://example.com/",
+            "-H", "user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ])
+        
+        print(f"📥 Downloading 720p video to: ./downloads/{output_name}")
+        print("=" * 80)
+        
+        result = subprocess.run(cmd)
+        
+        if result.returncode == 0:
+            print("\n" + "=" * 80)
+            print("✅ Download Complete!")
+            break
+        else:
+            print(f"\n⚠️  Download failed with exit code {result.returncode}")
+            if attempt < max_retries - 1:
+                print(f"🔄 Retrying with fewer threads...")
+                # Clean up partial downloads
+                import shutil
+                tmp_dir = Path(f"./downloads/tmp/{output_name}")
+                if tmp_dir.exists():
+                    shutil.rmtree(tmp_dir)
+                    print(f"🗑️  Cleaned up partial download")
+            else:
+                print(f"❌ All {max_retries} attempts failed")
+    
+    if result and result.returncode == 0:
         # Check if we have separate audio and video files
         video_file = Path(f"./downloads/{output_name}.mp4")
         audio_file = Path(f"./downloads/{output_name}.m4a")
         
         if video_file.exists() and audio_file.exists():
-            # Step 1: Decrypt the files using mp4decrypt
-            print("\n🔓 Decrypting files with mp4decrypt...")
-            
-            video_decrypted = Path(f"./downloads/{output_name}_decrypted.mp4")
-            audio_decrypted = Path(f"./downloads/{output_name}_decrypted.m4a")
-            
-            # Build mp4decrypt command with all keys
-            decrypt_args = []
-            for key in keys:
-                decrypt_args.extend(["--key", key])
-            
-            # Decrypt video
-            decrypt_video_cmd = ["mp4decrypt"] + decrypt_args + [str(video_file), str(video_decrypted)]
-            decrypt_result = subprocess.run(decrypt_video_cmd, capture_output=True, text=True)
-            
-            if decrypt_result.returncode != 0:
-                print(f"⚠️  Video decryption warning: {decrypt_result.stderr[:200]}")
-            else:
-                print(f"✅ Video decrypted (720p)")
-            
-            # Decrypt audio
-            decrypt_audio_cmd = ["mp4decrypt"] + decrypt_args + [str(audio_file), str(audio_decrypted)]
-            decrypt_result = subprocess.run(decrypt_audio_cmd, capture_output=True, text=True)
-            
-            if decrypt_result.returncode != 0:
-                print(f"⚠️  Audio decryption warning: {decrypt_result.stderr[:200]}")
-            else:
-                print(f"✅ Audio decrypted")
-            
-            # Step 2: Merge decrypted files
-            merged_file = Path(f"./downloads/{output_name}_720p_FINAL.mp4")
-            
-            if video_decrypted.exists() and audio_decrypted.exists():
-                print("\n🔧 Merging decrypted audio and video...")
-                merge_cmd = [
-                    "ffmpeg",
-                    "-i", str(video_decrypted),
-                    "-i", str(audio_decrypted),
-                    "-c", "copy",
-                    "-map", "0:v:0",
-                    "-map", "1:a:0",
-                    str(merged_file),
-                    "-y"
-                ]
-                
-                merge_result = subprocess.run(merge_cmd, capture_output=True, text=True)
-                
-                if merge_result.returncode == 0:
-                    print(f"✅ Final 720p file created!")
-                    print(f"\n📁 READY TO PLAY: {merged_file}")
-                    print(f"   Resolution: 1280x720")
-                    
-                    video_file.unlink(missing_ok=True)
-                    audio_file.unlink(missing_ok=True)
-                    video_decrypted.unlink(missing_ok=True)
-                    audio_decrypted.unlink(missing_ok=True)
-                    print("🗑️  Cleaned up intermediate files")
-                else:
-                    print(f"⚠️  Merge failed. Decrypted files available:")
-                    print(f"   Video: {video_decrypted}")
-                    print(f"   Audio: {audio_decrypted}")
-            else:
-                print(f"⚠️  Decryption may have failed. Check files manually.")
+            # Use the helper function to decrypt and merge
+            success = process_downloaded_files(output_name, keys, video_file, audio_file)
+            print("=" * 80)
+            return success
         else:
             print(f"📁 File: ./downloads/{output_name}.*")
         
@@ -311,9 +413,13 @@ def download_with_keys(mpd_url, keys, output_name):
         return True
     else:
         print("\n" + "=" * 80)
-        print(f"❌ Download failed (exit code {result.returncode})")
+        if result:
+            print(f"❌ Download failed (exit code {result.returncode})")
+        else:
+            print(f"❌ Download failed")
         print("=" * 80)
         return False
+
 
 
 def main():

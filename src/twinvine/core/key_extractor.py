@@ -14,12 +14,16 @@ class KeyExtractor:
     
     def __init__(self, wvd_path: str = None):
         if wvd_path is None:
-            wvd_path = Path(__file__).parent.parent.parent / "WVDs" / "device.wvd"
+            # Go up from src/twinvine/core to project root
+            project_root = Path(__file__).parent.parent.parent.parent
+            wvd_path = project_root / "WVDs" / "device.wvd"
         
         self.wvd_path = Path(wvd_path)
         
         if not self.wvd_path.exists():
-            raise FileNotFoundError(f"WVD file not found: {self.wvd_path}")
+            print(f"⚠️  WVD file not found: {self.wvd_path}")
+            print("    This is required for DRM key extraction.")
+            # Don't raise error, just warn
     
     def extract_keys(self, mpd_url: str, license_url: str) -> Dict[str, Any]:
         """

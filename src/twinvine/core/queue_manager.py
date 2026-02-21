@@ -17,7 +17,9 @@ class QueueManager:
     
     def __init__(self, queue_path: Optional[str] = None):
         if queue_path is None:
-            queue_path = Path(__file__).parent.parent.parent / "vaults" / "course_cache" / "auto_queue.json"
+            # Go up from src/twinvine/core to project root  
+            project_root = Path(__file__).parent.parent.parent.parent
+            queue_path = project_root / "vaults" / "course_cache" / "auto_queue.json"
         
         self.queue_path = Path(queue_path)
         self.queue_path.parent.mkdir(parents=True, exist_ok=True)

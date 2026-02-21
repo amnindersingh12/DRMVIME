@@ -6,6 +6,19 @@ members = ["packages/*"]
 [tool.uv.sources]
 envied = { workspace = true }
 
+[project]
+name = "twinvine"
+version = "1.0.0"
+description = "DRM-protected course video downloader for Testbook"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
+    "requests>=2.31.0",
+    "tqdm>=4.66.0",
+    "pywidevine>=1.8.0",
+]
+
 # Optional shared dev deps
 [dependency-groups]
 dev = [
@@ -17,4 +30,3 @@ dev = [
 
 [tool.uv]
 constraint-dependencies = ["lxml>=6.0.2"]
-

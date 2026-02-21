@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TwinVine URL Capturer",
-  "version": "1.0",
+  "version": "1.2.0",
   "description": "Automatically captures MPD and License URLs for TwinVine downloader",
   "permissions": [
     "webRequest",
@@ -9,16 +9,57 @@
     "clipboardWrite",
     "notifications",
     "activeTab",
-    "scripting"
+    "scripting",
+    "downloads",
+    "cookies"
   ],
   "host_permissions": [
     "*://mediacdn.testbook.com/*",
     "*://india-drm.sdmc.tv/*",
-    "*://*.testbook.com/*"
+    "*://*.testbook.com/*",
+    "*://cdn.testbook.com/*",
+    "*://assets.testbook.com/*",
+    "*://*.cloudfront.net/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.testbook.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://*.testbook.com/*"
+      ],
+      "js": [
+        "api-interceptor.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://*.testbook.com/*",
+        "*://mediacdn.testbook.com/*",
+        "*://cdn.testbook.com/*",
+        "*://assets.testbook.com/*",
+        "*://*.cloudfront.net/*",
+        "<all_urls>"
+      ],
+      "js": [
+        "iframe-extractor.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

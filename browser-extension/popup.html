@@ -58,6 +58,42 @@
       color: #1967d2;
     }
 
+    .server-status {
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .server-online {
+      background: #e6f4ea;
+      color: #137333;
+    }
+
+    .server-offline {
+      background: #fce8e6;
+      color: #c5221f;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .dot-green { background: #34a853; }
+    .dot-red   { background: #ea4335; animation: pulse 1.5s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
     .label {
       font-weight: 500;
       margin-bottom: 5px;
@@ -69,6 +105,12 @@
 <body>
   <h3>🎬 TwinVine Capturer</h3>
 
+  <!-- Server health indicator -->
+  <div id="serverStatus" class="server-status server-offline">
+    <span class="dot dot-red" id="serverDot"></span>
+    <span id="serverText">Server offline — run: python twinvine.py server</span>
+  </div>
+
   <div class="section">
     <div class="label">Queue Status</div>
     <div id="status" class="status info">
@@ -79,6 +121,10 @@
   <div class="section">
     <button id="viewQueue">View Queue</button>
     <button id="clearQueue" class="secondary">Clear Queue</button>
+  </div>
+
+  <div class="section">
+    <button id="downloadPdf" style="background: #ea4335;">📄 Download PDF</button>
   </div>
 
   <div id="queueList" style="display: none; margin-top: 10px; max-height: 200px; overflow-y: auto;">

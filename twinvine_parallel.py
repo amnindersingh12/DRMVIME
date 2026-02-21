@@ -25,7 +25,7 @@ import threading
 from tqdm import tqdm
 
 # Import core functions
-from twinvine_720p import get_keys, extract_metadata_from_mpd
+from twinvine_core import get_keys, extract_metadata_from_mpd
 
 
 class ParallelDownloader:
@@ -201,9 +201,8 @@ class ParallelDownloader:
                 "--save-dir", "./downloads",
                 "--tmp-dir", f"./downloads/tmp_{lesson_num}",
                 "--binary-merge",
-                "--thread-count", "4",  # Use 4 threads for parallel downloads (stable)
-                "--auto-select",
-                "--check-segments-count", "false"  # Skip segment count check
+                "-mt",
+                "--auto-select"
             ]
             
             # Add keys
@@ -291,8 +290,7 @@ class ParallelDownloader:
             print("\nRun: python twinvine_parallel.py capture")
             return
         
-        # Include both 'pending' and 'failed' lessons for retry
-        pending = [l for l in lessons if l.get('status') in ['pending', 'failed']]
+        pending = [l for l in lessons if l.get('status') == 'pending']
         
         if not pending:
             print("✅ All lessons already downloaded!")
@@ -391,18 +389,12 @@ class ParallelDownloader:
             
             print(f"{icon} Lesson {lesson['number']:02d}: {lesson['filename']} ({duration})")
         
-        pending = len([l for l in lessons if l.get('status') in ['pending', 'failed']])
+        pending = len([l for l in lessons if l.get('status') == 'pending'])
         downloaded = len([l for l in lessons if l.get('status') == 'downloaded'])
-        failed = len([l for l in lessons if l.get('status') == 'failed'])
         
         print("="*80)
         print(f"✅ Downloaded: {downloaded}")
-        if failed > 0:
-            print(f"❌ Failed: {failed}")
         print(f"⏳ Pending: {pending}")
-        
-        if pending > 0:
-            print(f"\n🔄 Retry failed downloads: python twinvine_parallel.py download")
 
 
 def main():

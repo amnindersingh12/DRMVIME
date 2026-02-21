@@ -11,6 +11,7 @@ Usage:
   python twinvine.py single      # Download single video (manual)
 """
 
+import os
 import subprocess
 import sys
 import json
@@ -30,8 +31,7 @@ except ImportError:
     FLASK_AVAILABLE = False
 
 # Import core functions
-from twinvine_720p import get_keys, extract_metadata_from_mpd, download_with_keys
-
+from twinvine_core import get_keys, extract_metadata_from_mpd, download_with_keys
 
 class TwinVine:
     """Complete TwinVine downloader"""
@@ -42,6 +42,31 @@ class TwinVine:
         self.queue_file = self.cache_dir / "auto_queue.json"
         self.max_workers = max_workers
         self.lock = threading.Lock()
+        
+        # Check dependencies in download modes
+        if len(sys.argv) > 1 and sys.argv[1].lower() in ['download', 'single']:
+            self._check_dependencies()
+            
+    def _check_dependencies(self):
+        """Check if required binaries exist"""
+        import shutil
+        missing = []
+        
+        if not shutil.which("ffmpeg"):
+            missing.append("ffmpeg")
+            
+        if not shutil.which("mp4decrypt"):
+            missing.append("mp4decrypt (bento4)")
+            
+        if not shutil.which("N_m3u8DL-RE") and not Path("./bin/N_m3u8DL-RE").exists():
+            missing.append("N_m3u8DL-RE")
+            
+        if missing:
+            print("❌ Missing required dependencies:")
+            for m in missing:
+                print(f"  - {m}")
+            print("\nPlease install them or place them in your system PATH (or ./bin/) before proceeding.")
+            sys.exit(1)
     
     # ==================== QUEUE MANAGEMENT ====================
     
@@ -111,18 +136,31 @@ class TwinVine:
             
             print(f"{icon} Lesson {lesson['number']:02d}: {filename} ({duration})")
         
-        pending = len([l for l in queue if l.get('status') == 'pending'])
+        pending = len([l for l in queue if l.get('status') in ('pending', 'failed')])
         downloaded = len([l for l in queue if l.get('status') == 'downloaded'])
+        failed = len([l for l in queue if l.get('status') == 'failed'])
         
         print("="*80)
         print(f"✅ Downloaded: {downloaded}")
-        print(f"⏳ Pending: {pending}")
+        if failed > 0:
+            print(f"❌ Failed:     {failed}  (run: python twinvine.py retry)")
+        print(f"⏳ Pending:    {pending}")
         
         if pending > 0:
             print(f"\nReady to download! Run: python twinvine.py download")
     
     # ==================== DOWNLOAD ====================
     
+    def _clean_tmp_dirs(self):
+        """Remove leftover tmp_* directories from previous failed downloads"""
+        import shutil
+        tmp_dirs = list(Path("./downloads").glob("tmp_*")) if Path("./downloads").exists() else []
+        for d in tmp_dirs:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+        if tmp_dirs:
+            print(f"🗑️  Cleaned {len(tmp_dirs)} leftover tmp dir(s)")
+
     def download_single_lesson(self, lesson, queue):
         """Download a single lesson (runs in thread)"""
         lesson_num = lesson['number']
@@ -135,18 +173,28 @@ class TwinVine:
             if local_binary.exists():
                 binary_path = str(local_binary)
             
-            Path("./downloads").mkdir(exist_ok=True)
-            Path(f"./downloads/tmp_{lesson_num}").mkdir(exist_ok=True)
-            
+            # Determine save dir from lesson data (3-level folder structure)
+            folder = lesson.get('save_dir') or lesson.get('folder') or ''
+            if folder and not str(folder).startswith('./downloads'):
+                folder = f"./downloads/{folder}"
+            save_dir = Path(folder) if folder else Path("./downloads")
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            tmp_dir = Path(f"./downloads/tmp_{lesson_num}")
+            tmp_dir.mkdir(exist_ok=True)
+
             cmd = [
                 binary_path,
                 lesson['mpd_url'],
                 "--save-name", filename,
-                "--save-dir", "./downloads",
-                "--tmp-dir", f"./downloads/tmp_{lesson_num}",
+                "--save-dir", "./downloads",     # always download flat first
+                "--tmp-dir", str(tmp_dir),
                 "--binary-merge",
                 "-mt",
-                "--auto-select"
+                "--auto-select",
+                "--select-video", "best",         # explicitly pick highest res
+                "--thread-count", "16",
+                "--check-segments-count", "false",
             ]
             
             # Add keys
@@ -156,8 +204,8 @@ class TwinVine:
             # Add headers
             cmd.extend([
                 "-H", "accept: */*",
-                "-H", "origin: https://testbook.com",
-                "-H", "referer: https://testbook.com/",
+                "-H", "origin: https://example.com",
+                "-H", "referer: https://example.com/",
                 "-H", "user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
             ])
             
@@ -187,9 +235,24 @@ class TwinVine:
                 subprocess.run(["mp4decrypt"] + decrypt_args + [str(audio_file), str(audio_decrypted)], 
                              capture_output=True)
                 
-                # Merge
-                merged_file = Path(f"./downloads/{filename}_720p_FINAL.mp4")
-                
+                # Detect actual resolution for filename
+                res_label = "FINAL"
+                try:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                         str(video_decrypted)],
+                        capture_output=True, text=True
+                    )
+                    if probe.returncode == 0 and probe.stdout.strip():
+                        w, h = probe.stdout.strip().split(",")
+                        res_label = f"{h}p"
+                except Exception:
+                    pass
+
+                # Merge into course folder
+                merged_file = save_dir / f"{filename}_{res_label}_FINAL.mp4"
+
                 merge_cmd = [
                     "ffmpeg", "-i", str(video_decrypted), "-i", str(audio_decrypted),
                     "-c", "copy", "-map", "0:v:0", "-map", "1:a:0",
@@ -199,7 +262,22 @@ class TwinVine:
                 result = subprocess.run(merge_cmd, capture_output=True)
                 
                 if result.returncode == 0:
-                    # Cleanup
+                    # Download PDF if available
+                    pdf_url = lesson.get('pdf_url', '')
+                    if pdf_url:
+                        try:
+                            import requests as req
+                            pdf_name = lesson.get('pdf_filename') or f"{filename}.pdf"
+                            pdf_path = save_dir / pdf_name
+                            print(f"📄 Downloading PDF: {pdf_name}")
+                            r = req.get(pdf_url, timeout=30)
+                            r.raise_for_status()
+                            pdf_path.write_bytes(r.content)
+                            print(f"✅ PDF saved: {pdf_path}")
+                        except Exception as pdf_err:
+                            print(f"⚠️  PDF download failed: {pdf_err}")
+
+                    # Cleanup intermediate files
                     video_file.unlink(missing_ok=True)
                     audio_file.unlink(missing_ok=True)
                     video_decrypted.unlink(missing_ok=True)
@@ -217,8 +295,11 @@ class TwinVine:
             self.save_queue(queue)
             return False
     
-    def download_all(self):
+    def download_all(self, retry_only=False):
         """Download all lessons in parallel"""
+        # Clean stale tmp dirs first
+        self._clean_tmp_dirs()
+        
         # Remove duplicates first
         removed = self.remove_duplicates()
         if removed > 0:
@@ -231,7 +312,18 @@ class TwinVine:
             print("\nStart server first: python twinvine.py server")
             return
         
-        pending = [l for l in queue if l.get('status') == 'pending']
+        if retry_only:
+            pending = [l for l in queue if l.get('status') == 'failed']
+            if not pending:
+                print("✅ No failed lessons to retry!")
+                return
+            # Reset them to pending
+            for l in pending:
+                l['status'] = 'pending'
+            self.save_queue(queue)
+            print(f"🔄 Retrying {len(pending)} failed lesson(s)...")
+        else:
+            pending = [l for l in queue if l.get('status') == 'pending']
         
         if not pending:
             print("✅ All lessons already downloaded!")
@@ -252,10 +344,13 @@ class TwinVine:
             print(f"  ... and {len(pending) - 5} more")
         
         print()
-        confirm = input(f"Start parallel download? (y/N): ").strip().lower()
-        if confirm != 'y':
-            print("Cancelled")
-            return
+        # --yes flag skips confirmation
+        yes = '--yes' in sys.argv
+        if not yes:
+            confirm = input(f"Start parallel download? (y/N): ").strip().lower()
+            if confirm != 'y':
+                print("Cancelled")
+                return
         
         print(f"\n🚀 Starting {self.max_workers} parallel downloads...")
         print("="*80)
@@ -329,7 +424,9 @@ class TwinVine:
                 data = request.json
                 mpd_url = data.get('mpd_url')
                 license_url = data.get('license_url')
-                page_title = data.get('page_title', '')  # Get page title from extension
+                page_title = data.get('page_title', '')
+                pdf_url = data.get('pdf_url', '')
+                pdf_filename = data.get('pdf_filename', '')
                 
                 if not mpd_url or not license_url:
                     return jsonify({'error': 'Missing URLs'}), 400
@@ -398,22 +495,43 @@ class TwinVine:
                 
                 print(f"✅ Extracted {len(keys)} keys")
                 
-                # Generate filename from page title or metadata
+                # Generate filename using a clean title extractor
+                import re
                 lesson_num = len(queue) + 1
-                
-                if page_title:
-                    # Clean page title for filename
-                    filename = page_title.strip()
-                    # Remove common suffixes
-                    filename = filename.replace(' - Testbook', '').replace(' | Testbook', '')
-                    # Clean invalid characters
-                    filename = filename.replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_').replace('|', '_')
-                    filename = f"lesson{lesson_num:02d}_{filename[:50]}"
-                else:
-                    title = metadata.get('title', f'lesson{lesson_num:02d}')
-                    filename = f"lesson{lesson_num:02d}_{title[:20]}"
-                    filename = filename.replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_')
-                
+                BRAND_WORDS = {'testbook', 'testbook.com', 'login', 'signup', 'home', 'dashboard', 'video', ''}
+
+                def clean_title(raw):
+                    """Clean a page/MPD title into a safe, readable filename."""
+                    t = raw.strip()
+                    for suffix in [' - Testbook', ' | Testbook', '- Testbook', '| Testbook',
+                                   ' - testbook.com', ' | testbook.com']:
+                        t = t.replace(suffix, '')
+                    t = re.sub(r'\s+', ' ', t).strip().strip(' -|')
+                    for ch in ['/', '\\', ':', '?', '*', '|', '"', '<', '>']:
+                        t = t.replace(ch, '_')
+                    t = t[:60].strip()
+                    # Reject if it's just a brand/empty word
+                    if t.lower() in BRAND_WORDS:
+                        return ''
+                    return t
+
+                def url_fallback_title():
+                    """Extract a title from the MPD URL hash as last resort."""
+                    parts = mpd_url.rstrip('/').split('/')
+                    # Use the directory hash before the .mpd filename
+                    candidate = parts[-2] if len(parts) >= 2 else ''
+                    return candidate[:20] if candidate else f'lesson{lesson_num:02d}'
+
+                raw = page_title or metadata.get('title', '')
+                clean = clean_title(raw) if raw else ''
+                if not clean:
+                    clean = url_fallback_title()
+                    print(f"⚠️  Title was brand/empty — using URL fallback: {clean}")
+
+                filename = f"lesson{lesson_num:02d}_{clean}"
+                print(f"📝 Filename: {filename}")
+
+
                 # Add to queue
                 lesson = {
                     'number': lesson_num,
@@ -422,6 +540,8 @@ class TwinVine:
                     'keys': keys,
                     'metadata': metadata,
                     'page_title': page_title,
+                    'pdf_url': pdf_url,
+                    'pdf_filename': pdf_filename,
                     'captured_at': datetime.now().isoformat(),
                     'status': 'pending'
                 }
@@ -463,6 +583,62 @@ class TwinVine:
                 'downloaded': len([l for l in queue if l.get('status') == 'downloaded'])
             })
         
+        @app.route('/save-pdf', methods=['POST'])
+        def save_pdf_to_queue():
+            """Save a PDF-only entry to auto_queue.json"""
+            try:
+                data = request.json
+                pdf_url = data.get('pdf_url')
+                pdf_name = data.get('pdf_name', '')
+
+                if not pdf_url or not pdf_name:
+                    return jsonify({'error': 'Missing pdf_url or pdf_name'}), 400
+
+                queue = self.load_queue()
+
+                # Deduplicate
+                for entry in queue:
+                    if entry.get('pdf_url') == pdf_url:
+                        return jsonify({
+                            'success': False,
+                            'error': 'duplicate',
+                            'existing': entry.get('pdf_name')
+                        }), 200
+
+                import re
+                lesson_num = len(queue) + 1
+                # Strip timestamp suffix e.g. _1758716557.pdf → clean name
+                clean = re.sub(r'_\d{9,10}(\.pdf)?$', '', pdf_name, flags=re.IGNORECASE).strip()
+                clean = re.sub(r'\.pdf$', '', clean, flags=re.IGNORECASE).strip()
+                filename = f"lesson{lesson_num:02d}_{clean}"
+
+                entry = {
+                    'number': lesson_num,
+                    'filename': filename,
+                    'pdf_url': pdf_url,
+                    'pdf_name': pdf_name,
+                    'captured_at': datetime.now().isoformat(),
+                    'status': 'pending'
+                }
+
+                queue.append(entry)
+                self.save_queue(queue)
+
+                print(f"\n📄 PDF saved to queue: {filename}")
+                print(f"   🔗 {pdf_url[:80]}...")
+                print(f"   📋 Queue: {len(queue)} entries")
+
+                return jsonify({
+                    'success': True,
+                    'filename': filename,
+                    'lesson_number': lesson_num,
+                    'queue_length': len(queue)
+                }), 200
+
+            except Exception as e:
+                print(f"❌ save-pdf error: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @app.route('/health', methods=['GET'])
         def health():
             """Health check"""
@@ -472,7 +648,8 @@ class TwinVine:
         print("🎬 TwinVine Auto-Capture Server")
         print("="*80)
         print()
-        print("Server running on http://localhost:8765")
+        port = int(os.environ.get('TWINVINE_PORT', 8765))
+        print(f"Server running on http://localhost:{port}")
         print()
         print("How to use:")
         print("1. Keep this server running")
@@ -482,18 +659,63 @@ class TwinVine:
         print("5. Keys extracted and cached automatically")
         print("6. Later: python twinvine.py download")
         print()
+        print("  Set TWINVINE_PORT env var to change port (default 8765)")
+        print()
         print("="*80)
         print()
         
-        app.run(host='localhost', port=8765, debug=False)
+        app.run(host='localhost', port=port, debug=True, use_reloader=True)
     
     # ==================== SINGLE VIDEO MODE ====================
     
     def download_single(self):
-        """Download single video (manual mode)"""
-        from twinvine_720p import main as single_main
-        single_main()
+        """Download a single video (manual mode using twinvine_core)"""
+        print("="*80)
+        print("🎬 TwinVine Single Video Downloader")
+        print("="*80)
+        print()
+        
+        wvd_path = "./WVDs/device.wvd"
+        videos_downloaded = 0
+        
+        while True:
+            mpd_url = input("📍 Paste the MPD URL (.mpd): ").strip()
+            if not mpd_url:
+                if videos_downloaded > 0:
+                    print(f"\n🎉 Done! Downloaded {videos_downloaded} video(s)")
+                    break
+                print("❌ No URL provided.")
+                sys.exit(1)
+            
+            license_url = input("🔐 Paste License URL (with token): ").strip()
+            if not license_url or "getlicense" not in license_url:
+                print("❌ Invalid license URL!")
+                continue
+            
+            output_name = input("💾 Output filename (without extension): ").strip() or f"twinvine_{videos_downloaded+1:02d}"
+            output_name = output_name.replace('/', '_').replace(':', '_').replace('?', '_')
+            
+            try:
+                keys = get_keys(mpd_url, license_url, wvd_path)
+                success = download_with_keys(mpd_url, keys, output_name)
+                if success:
+                    videos_downloaded += 1
+                another = input("📥 Download another? (y/N): ").strip().lower()
+                if another != 'y':
+                    break
+            except KeyboardInterrupt:
+                print("\n⚠️  Interrupted")
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                sys.exit(1)
     
+    # ==================== RETRY FAILED ====================
+
+    def retry_failed(self):
+        """Retry all failed downloads"""
+        self.download_all(retry_only=True)
+
     # ==================== CLEAR ====================
     
     def clear_queue(self):
@@ -513,16 +735,21 @@ def main():
         print("Commands:")
         print("  python twinvine.py server      # Start auto-capture server")
         print("  python twinvine.py status      # Show queue status")
-        print("  python twinvine.py download    # Download all videos")
-        print("  python twinvine.py single      # Download single video")
+        print("  python twinvine.py download    # Download all pending videos")
+        print("  python twinvine.py retry       # Retry all failed downloads")
+        print("  python twinvine.py single      # Download a single video (manual)")
         print("  python twinvine.py clear       # Clear queue")
         print()
         print("Options:")
         print("  --workers N    Parallel downloads (default: 3)")
+        print("  --yes          Skip confirmation prompt")
         print()
         print("Examples:")
         print("  python twinvine.py server")
         print("  python twinvine.py download --workers 5")
+        print("  python twinvine.py retry")
+        print()
+        print("  Set TWINVINE_PORT env var to change server port (default 8765)")
         print()
         print("="*80)
         return
@@ -538,21 +765,23 @@ def main():
         except:
             pass
     
-    app = TwinVine(max_workers=max_workers)
+    tv = TwinVine(max_workers=max_workers)
     
     if command == 'server':
-        app.start_server()
+        tv.start_server()
     elif command == 'status':
-        app.show_status()
+        tv.show_status()
     elif command == 'download':
-        app.download_all()
+        tv.download_all()
+    elif command == 'retry':
+        tv.retry_failed()
     elif command == 'single':
-        app.download_single()
+        tv.download_single()
     elif command == 'clear':
-        app.clear_queue()
+        tv.clear_queue()
     else:
         print(f"❌ Unknown command: {command}")
-        print("Use: server, status, download, single, or clear")
+        print("Use: server, status, download, retry, single, or clear")
 
 
 if __name__ == "__main__":
